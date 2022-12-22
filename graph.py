@@ -6,10 +6,10 @@ digraph G {
     edge [fontname = "Handlee"];
     
     
-    input [ label = "テキスト入力" ];
+    input [ label = "英文入力" ];
     
-    summerization [ label = "要約" ];
-    translation [ label = "英日翻訳" ];
+    summerization [ label = "1/3~1/2に要約" ];
+    translation [ label = "英→日翻訳" ];
     write [ label = "結果記録" ];
     judge [ label = "ユーザ判断";shape = diamond;];
     good [ label = "👍" ];

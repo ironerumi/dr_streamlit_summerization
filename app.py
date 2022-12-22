@@ -281,7 +281,7 @@ header = st.markdown(
 )
 description2 = st.markdown(
     "*Naming is not my own, inspired by ChatGPT.*  \n"
-    "Delivered by DataRobot. Made with :gift_heart:.  \n"
+    "Model hosted by DataRobot. Made with :gift_heart:.  \n"
     "Summerization based on [JulesBelveze/t5-small-headline-generator](https://huggingface.co/JulesBelveze/t5-small-headline-generator)  \n"
     "Translation based on [staka/takomt](https://huggingface.co/staka/takomt)  \n"
 )
@@ -289,7 +289,7 @@ with st.sidebar:
     st.text("処理フロー")
     description3 = st.graphviz_chart(graph_string)
 input = st.text_area(
-    label="内容を入力（「**要約**」クリック前に ⌘+↩ 押してください）",
+    label="英文を入力（「**要約**」クリック前に ⌘+↩ 押してください）",
     # height=20,
 )
 
