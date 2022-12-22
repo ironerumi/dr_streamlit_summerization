@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 import uuid
@@ -8,6 +9,8 @@ import snowflake.connector
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
 from snowflake.connector.pandas_tools import pd_writer
+
+from graph import graph_string
 
 user = st.secrets["snowflake"]["user"]
 password = st.secrets["snowflake"]["password"]
@@ -21,12 +24,13 @@ API_HOST = st.secrets["datarobot"]["API_HOST"]
 API_URL = "https://{api_host}/predApi/v1.0/deployments/{deployment_id}/predictionsUnstructured"  # noqa
 API_KEY = st.secrets["datarobot"]["API_KEY"]
 DATAROBOT_KEY = st.secrets["datarobot"]["DATAROBOT_KEY"]
-DEPLOYMENT_ID = st.secrets["datarobot"]["DEPLOYMENT_ID"]
+DEPLOYMENT_ID_SMRY = st.secrets["datarobot"]["DEPLOYMENT_ID_SMRY"]
+DEPLOYMENT_ID_TRANS = st.secrets["datarobot"]["DEPLOYMENT_ID_TRANS"]
 
 # Don't change this. It is enforced server-side too.
 MAX_PREDICTION_FILE_SIZE_BYTES = 52428800  # 50 MB
 
-columns = ["ID", "SUB_ID", "INPUT", "OUTPUT", "RATING"]
+columns = ["ID", "SUB_ID", "INPUT", "SUMMARY", "TRANSLATION", "RATING"]
 sf_url = "snowflake://{user}:{password}@{account}/{db}/{schema}?warehouse={warehouse}"
 sql_update = """
 UPDATE {database}.{schema}.{table} s
@@ -34,6 +38,7 @@ SET s.RATING = {rate}
 WHERE s.ID='{id}'
 AND s.SUB_ID ='{id_sub}';
 """
+st.set_page_config(initial_sidebar_state="collapsed")
 
 
 class DataRobotPredictionError(Exception):
@@ -105,7 +110,7 @@ def _raise_dataroboterror_for_status(response):
         raise DataRobotPredictionError(err_msg)
 
 
-def predict(data, deployment_id=DEPLOYMENT_ID):
+def predict(data, deployment_id=DEPLOYMENT_ID_SMRY):
     data_size = sys.getsizeof(data)
     if data_size >= MAX_PREDICTION_FILE_SIZE_BYTES:
         print(
@@ -153,17 +158,26 @@ def summerized_n_record():
     # reset
     st.session_state["id"] = uuid.uuid4().hex
     st.session_state["id_sub"] = uuid.uuid4().hex
-    st.session_state["input"] = input.strip(" ").strip("\n")
+    st.session_state["input"] = os.linesep.join(
+        [s for s in input.strip(" ").splitlines() if s]
+    )
     st.session_state["sent"] = False
-    st.session_state["output"] = ""
+    st.session_state["summary"] = ""
+    st.session_state["translation"] = ""
     st.session_state["disable_dl"] = True
     # predict
-    preds = predict(st.session_state["input"])
+    preds = predict(st.session_state["input"], deployment_id=DEPLOYMENT_ID_SMRY)
     preds = json.loads(preds)
-    st.session_state["output"] = "\n".join(
-        [summary["summary_text"] for summary in preds["prediction"]]
+    st.session_state["summary"] = "\n".join(
+        [pred["summary_text"] for pred in preds["prediction"]]
     )
-    t = preds["model_run_time_seconds"]
+    t1 = preds["model_run_time_seconds"]
+    preds = predict(st.session_state["summary"], deployment_id=DEPLOYMENT_ID_TRANS)
+    preds = json.loads(preds)
+    st.session_state["translation"] = "\n".join(
+        [pred["translation_text"] for pred in preds["prediction"]]
+    )
+    t2 = preds["model_run_time_seconds"]
 
     # record to sf
     df = pd.DataFrame(
@@ -172,7 +186,8 @@ def summerized_n_record():
                 st.session_state["id"],
                 st.session_state["id_sub"],
                 st.session_state["input"],
-                st.session_state["output"],
+                st.session_state["summary"],
+                st.session_state["translation"],
                 0,
             )
         ],
@@ -183,8 +198,9 @@ def summerized_n_record():
     )
     # change display
     # output_area.text_area(label="要約結果", value=output, disabled=st.session_state["disable_dl"])
-    st.session_state["status_msg"] = f"計算時間: {t:.2f}秒"
+    st.session_state["status_msg"] = f"計算時間: 要約{t1:.2f}秒、翻訳{t2:.2f}秒"
     st.session_state["disable_dl"] = False
+    st.session_state["dl_csv"] = prepare_download()
 
 
 def update_status(id, id_sub, rate):
@@ -204,7 +220,7 @@ def update_status(id, id_sub, rate):
 def upvote_callback():
     if st.session_state["sent"]:
         st.session_state["status_msg"] = "既に送信した"
-    elif st.session_state["output"] == "":
+    elif st.session_state["translation"] == "":
         st.session_state["status_msg"] = "まだ要約してない"
     else:
         update_status(st.session_state["id"], st.session_state["id_sub"], 1)
@@ -215,12 +231,25 @@ def upvote_callback():
 def downvote_callback():
     if st.session_state["sent"]:
         st.session_state["status_msg"] = "既に送信した"
-    elif st.session_state["output"] == "":
+    elif st.session_state["translation"] == "":
         st.session_state["status_msg"] = "まだ要約してない"
     else:
         update_status(st.session_state["id"], st.session_state["id_sub"], -1)
         st.session_state["status_msg"] = "👎を記録した..."
         st.session_state["sent"] = True
+
+
+def prepare_download():
+    _input = st.session_state["input"].split("\n")
+    _summary = st.session_state["summary"].split("\n")
+    _translation = st.session_state["translation"].split("\n")
+    return (
+        pd.DataFrame(
+            {"input": _input, "summary": _summary, "translation": _translation}
+        )
+        .to_csv(index=False)
+        .encode("utf-8")
+    )
 
 
 if "sent" not in st.session_state:
@@ -231,21 +260,38 @@ if "id_sub" not in st.session_state:
     st.session_state["id_sub"] = ""
 if "input" not in st.session_state:
     st.session_state["input"] = ""
-if "output" not in st.session_state:
-    st.session_state["output"] = ""
+if "summary" not in st.session_state:
+    st.session_state["summary"] = ""
+if "translation" not in st.session_state:
+    st.session_state["translation"] = ""
 if "status_msg" not in st.session_state:
     st.session_state["status_msg"] = ""
 if "disable_dl" not in st.session_state:
     st.session_state["disable_dl"] = True
+if "dl_csv" not in st.session_state:
+    st.session_state["dl_csv"] = ""
 
 
 conn, engine = init_connection()
 
-header = st.header("日本語要約")
-description = st.markdown(
-    "Delivered by DataRobot, summerized based on [mt5](https://huggingface.co/tsmatz/mt5_summarize_japanese), made with :gift_heart:"
+# header = st.header("英日簡化")
+header = st.markdown(
+    "<h1 style='text-align: center; color: DeepSkyBlue;'>英日簡化</h1>",
+    unsafe_allow_html=True,
 )
-input = st.text_area(label="内容を入力")
+description2 = st.markdown(
+    "*Naming is not my own, inspired by ChatGPT.*  \n"
+    "Delivered by DataRobot. Made with :gift_heart:.  \n"
+    "Summerization based on [JulesBelveze/t5-small-headline-generator](https://huggingface.co/JulesBelveze/t5-small-headline-generator)  \n"
+    "Translation based on [staka/takomt](https://huggingface.co/staka/takomt)  \n"
+)
+with st.sidebar:
+    st.text("処理フロー")
+    description3 = st.graphviz_chart(graph_string)
+input = st.text_area(
+    label="内容を入力（「**要約**」クリック前に ⌘+↩ 押してください）",
+    # height=20,
+)
 
 _, col12, _ = st.columns([2, 1, 2])
 with col12:
@@ -254,9 +300,10 @@ with col12:
 output_area = st.empty()
 output_text = output_area.text_area(
     label="要約結果",
-    value=st.session_state["output"],
+    value=st.session_state["translation"],
     placeholder="「要約」をクリック",
     disabled=True,
+    height=200,
 )
 _, col22, col23, _, col25 = st.columns([3, 1, 1, 1, 2])
 send_status = st.empty()
@@ -272,7 +319,7 @@ with col25:
     button_dl = st.empty()
     button_dl.download_button(
         "ダウンロード",
-        st.session_state["output"],
-        file_name="result.txt",
+        st.session_state["dl_csv"],
+        file_name="result.csv",
         disabled=st.session_state["disable_dl"],
     )
